@@ -618,7 +618,13 @@ MiniMap.refresh = function(opts, parts)
   -- Possibly update parts in asynchronous fashion
   if parts.lines then vim.schedule(H.update_map_lines) end
   if parts.scrollbar then vim.schedule(H.update_map_scrollbar) end
-  if parts.integrations then vim.schedule(H.update_map_integrations) end
+
+	vim.schedule(function() MiniMap.highlight_mark_lines() end)
+	-- MiniMap.highlight_mark_lines(marks)
+	if parts.integrations then vim.schedule(H.update_map_integrations) end
+
+	vim.schedule(function() MiniMap.update_mark_locations() end)
+
 end
 
 --- Close map window
@@ -857,6 +863,8 @@ MiniMap.gen_integration.diagnostic = function(hl_groups)
   )
 
   return function()
+    if vim.fn.has('nvim-0.6') == 0 then return {} end
+
     local line_hl = {}
     local diagnostic_arr = vim.diagnostic.get(MiniMap.current.buf_data.source)
     for _, data in ipairs(severity_data) do
@@ -925,6 +933,104 @@ MiniMap.gen_integration.gitsigns = function(hl_groups)
     return line_hl
   end
 end
+
+MiniMap.gen_integration.marks = function(hl_groups)
+	if hl_groups == nil then
+		local hl = 'IncludeInverted'
+		if not vim.fn.hlexists(hl) then
+			hl = 'Include'
+		end
+		hl_groups = { marks = hl }
+	end
+
+  local buf_id = MiniMap.current.buf_data.map
+  local ns_id = H.ns_id.integrations
+
+  return function()
+		local line_hl = {}
+		local marks = MiniMap.get_marks()
+		for _, mark in ipairs(marks) do
+			table.insert(line_hl, { line=mark[2], hl_group = hl_groups.marks })
+    end
+		for _, lh in ipairs(line_hl) do
+			local map_line = H.sourceline_to_mapline(lh.line)
+			H.add_line_hl(buf_id, ns_id, lh.hl_group, map_line - 1)
+		end
+		return line_hl
+	end
+end
+
+
+-- Marks
+MiniMap.get_marks = function()
+	local source_buf_id = MiniMap.current.buf_data.source
+	local marks = {}
+	-- uppercase
+	for _, data in ipairs(vim.fn.getmarklist()) do
+		local mark = data.mark:sub(2,3)
+		local pos = data.pos
+		if H.is_upper(mark) and pos[1] == source_buf_id then
+			marks[#marks + 1] = {mark, pos[2], pos[3]}
+		end
+	end
+	-- lowercase
+	for _, data in ipairs(vim.fn.getmarklist("%")) do
+		local mark = data.mark:sub(2, 3)
+		local pos = data.pos
+		if H.is_lower(mark) then
+			marks[#marks + 1] = {mark, pos[2], pos[3]}
+		end
+	end
+	return marks
+end
+
+MiniMap.highlight_mark_lines = function(marks, hl_groups)
+	if hl_groups == nil then
+		local hl = 'IncludeInverted'
+		if not vim.fn.hlexists(hl) then
+			hl = 'Include'
+		end
+		hl_groups = { marks = hl }
+	end
+	if marks == nil then
+		marks = MiniMap.get_marks()
+	end
+
+	local buf_id = MiniMap.current.buf_data.map
+	local ns_id = H.ns_id.integrations
+	-- local ns_id = "mini_marks_hahn"
+
+	local line_hl = {}
+	for _, mark in ipairs(marks) do
+		table.insert(line_hl, { line=mark[2], hl_group = hl_groups.marks })
+	end
+	for _, lh in ipairs(line_hl) do
+		local map_line = H.sourceline_to_mapline(lh.line)
+		H.add_line_hl(buf_id, ns_id, lh.hl_group, map_line - 1)
+	end
+	return line_hl
+end
+
+MiniMap.update_mark_locations = function(marks, hl_groups)
+  if hl_groups == nil then
+		hl_groups = { marks = 'Include' }
+	end
+	if marks == nil then
+		marks = MiniMap.get_marks()
+	end
+  local buf_id = MiniMap.current.buf_data.map
+  local ns_id = H.ns_id.integrations
+  local col = H.cache.scrollbar_data.offset - 1
+	for _, mark in ipairs(marks) do
+		local extmark_opts = {
+			virt_text = { { mark[1], 'Include' } },
+			virt_text_pos = 'overlay',
+			hl_mode = 'blend',
+		}
+		H.set_extmark_safely(buf_id, ns_id, H.sourceline_to_mapline(mark[2]) - 1, col, extmark_opts)
+	end
+end
+
 
 --- Act on content change
 ---
@@ -1113,7 +1219,7 @@ H.is_disabled = function() return vim.g.minimap_disable == true or vim.b.minimap
 H.get_config =
   function(config) return vim.tbl_deep_extend('force', MiniMap.config, vim.b.minimap_config or {}, config or {}) end
 
--- Work with mask -------------------------------------------------------------
+-- Work with mask --------------------------------------------------------------
 ---@param strings table Array of strings
 ---@return table Non-whitespace mask, boolean 2d array. Each row corresponds to
 ---   string, each column - to whether character with that number is a
@@ -1233,7 +1339,7 @@ H.mask_to_symbols = function(mask, opts)
   return res
 end
 
--- Work with config -----------------------------------------------------------
+-- Work with config ------------------------------------------------------------
 H.normalize_opts = function(x)
   x = vim.tbl_deep_extend('force', H.get_config(), MiniMap.current.opts or {}, x or {})
   H.validate_if(H.is_valid_opts, x, 'opts')
@@ -1318,7 +1424,7 @@ end
 
 H.msg_config = function(x_name, msg) return string.format('`%s` should be %s.', x_name, msg) end
 
--- Work with map window -------------------------------------------------------
+-- Work with map window --------------------------------------------------------
 H.normalize_window_options = function(win_opts, full)
   if full == nil then full = true end
 
@@ -1355,7 +1461,7 @@ H.is_window_open = function()
   return cur_win_id ~= nil and vim.api.nvim_win_is_valid(cur_win_id)
 end
 
--- Work with map updates ------------------------------------------------------
+-- Work with map updates -------------------------------------------------------
 H.create_map_buffer = function()
   local buf_id = vim.api.nvim_create_buf(false, true)
 
@@ -1540,6 +1646,7 @@ H.update_map_integrations = function()
   end
 end
 
+
 H.sourceline_to_mapline = function(source_line)
   local data = H.cache.encode_data
   local coef = data.rescaled_rows / data.source_rows
@@ -1556,7 +1663,7 @@ H.mapline_to_sourceline = function(map_line)
   return math.min(math.max(res, 1), data.source_rows)
 end
 
--- Predicates -----------------------------------------------------------------
+-- Predicates ------------------------------------------------------------------
 H.is_array_of = function(x, predicate)
   if not vim.tbl_islist(x) then return false end
   for _, v in ipairs(x) do
@@ -1622,6 +1729,19 @@ H.tbl_repeat = function(x, n)
     table.insert(res, x)
   end
   return res
+end
+
+-- stolen from https://github.com/chentoast/marks.nvim/blob/master/lua/marks/utils.lua
+function H.is_letter(char)
+  return H.is_upper(char) or H.is_lower(char)
+end
+
+function H.is_upper(char)
+  return (65 <= char:byte() and char:byte() <= 90)
+end
+
+function H.is_lower(char)
+  return (97 <= char:byte() and char:byte() <= 122)
 end
 
 return MiniMap
