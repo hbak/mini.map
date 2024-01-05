@@ -1,7 +1,9 @@
--- MIT License Copyright (c) 2022 Evgeni Chasnovski
-
--- Documentation ==============================================================
---- Window with buffer text overview, scrollbar, and highlights
+--- *mini.map* Window with buffer text overview
+--- *MiniMap*
+---
+--- MIT License Copyright (c) 2022 Evgeni Chasnovski
+---
+--- ==============================================================================
 ---
 --- Features:
 --- - Show and manage special floating window displaying automatically updated
@@ -49,9 +51,7 @@
 --- What it doesn't do:
 --- - Automatically refresh when typing in Insert mode. Although it can be done in
 ---   non-blocking way, it still might introduce considerable computation overhead
----   (especially in very large files). You can enable it manually by calling
----   |MiniMap.on_content_change()| on |TextChangedI| event and
----   |MiniMap.on_view_change()| on |CursorMovedI| event.
+---   (especially in very large files).
 --- - Has more flexible window configuration. In case a full height floating
 ---   window obstructs vision of underlying buffers, use |MiniMap.toggle()| or
 ---   |MiniMap.toggle_side()|. Works best with global statusline.
@@ -68,7 +68,7 @@
 ---     \   { buffer = true }
 ---     \ )]])
 --- <
---- # Setup~
+--- # Setup ~
 ---
 --- This module needs a setup with `require('mini.map').setup({})` (replace
 --- `{}` with your `config` table). It will create global Lua table `MiniMap`
@@ -80,13 +80,13 @@
 --- to buffer inside `vim.b.minimap_config` which should have same structure
 --- as `MiniMap.config`. See |mini.nvim-buffer-local-config| for more details.
 ---
---- # Dependencies~
+--- # Dependencies ~
 ---
 --- Suggested dependencies (provide extra functionality for integrations):
 --- - Plugin 'lewis6991/gitsigns.nvim' for Git status highlighting via
 ---   |MiniMap.gen_integration.gitsigns()|. If missing, no highlighting is added.
 ---
---- # Comparisons~
+--- # Comparisons ~
 ---
 --- - 'wfxr/minimap.vim':
 ---     - 'mini.map' doesn't have dependencies while being as fast as written
@@ -118,10 +118,10 @@
 ---     - 'mini.map' has fully extendable highlight integrations, while
 ---       'nvim-scrollbar' only supports diagnostic and search (with dependency).
 --- - 'lewis6991/satellite.nvim':
----     - Almost the same differencies as with 'dstein64/nvim-scrollview', except
+---     - Almost the same differences as with 'dstein64/nvim-scrollview', except
 ---       'satellite.nvim' can display some set of integration highlights.
 ---
---- # Highlight groups~
+--- # Highlight groups ~
 ---
 --- * `MiniMapNormal` - basic highlight of whole window.
 --- * `MiniMapSymbolCount` - counts of per-line integration items.
@@ -130,15 +130,13 @@
 ---
 --- To change any highlight group, modify it directly with |:highlight|.
 ---
---- # Disabling~
+--- # Disabling ~
 ---
---- To disable, set `g:minimap_disable` (globally) or `b:minimap_disable`
---- (for a buffer) to `v:true`. Considering high number of different scenarios
+--- To disable, set `vim.g.minimap_disable` (globally) or `vim.b.minimap_disable`
+--- (for a buffer) to `true`. Considering high number of different scenarios
 --- and customization intentions, writing exact rules for disabling module's
 --- functionality is left to user. See |mini.nvim-disabling-recipes| for common
 --- recipes.
----@tag mini.map
----@tag MiniMap
 
 --- # Mappings ~
 ---
@@ -169,7 +167,7 @@
 --- - Exit and enter Normal mode (if your Neovim version supports |ModeChanged|).
 ---@tag mini.map-usage
 
----@alias __opts table|nil Options used to define map configuration. Same structure
+---@alias __map_opts table|nil Options used to define map configuration. Same structure
 ---   as |MiniMap.config|. Will have effect until at least one tabpage has opened
 ---   map window. Default values are taken in the following order:
 ---   - From `opts` field of |MiniMap.current|.
@@ -197,35 +195,11 @@ MiniMap.setup = function(config)
   -- Apply config
   H.apply_config(config)
 
-  -- Module behavior
-  vim.api.nvim_exec(
-    [[augroup MiniMap
-        au!
-        au BufEnter,BufWritePost,TextChanged,VimResized * lua MiniMap.on_content_change()
-        au CursorMoved,WinScrolled * lua MiniMap.on_view_change()
-        au WinLeave * lua MiniMap.on_winleave()
-      augroup END]],
-    false
-  )
+  -- Define behavior
+  H.create_autocommands()
 
-  if vim.fn.exists('##ModeChanged') == 1 then
-    -- Refresh on every return to Normal mode
-    vim.api.nvim_exec(
-      [[augroup MiniMap
-          au ModeChanged *:n lua MiniMap.on_content_change()
-        augroup END]],
-      false
-    )
-  end
-
-  -- Create highlighting
-  vim.api.nvim_exec(
-    [[hi default link MiniMapNormal NormalFloat
-      hi default link MiniMapSymbolCount Special
-      hi default link MiniMapSymbolLine Title
-      hi default link MiniMapSymbolView Delimiter]],
-    false
-  )
+  -- Create default highlighting
+  H.create_default_hl()
 end
 
 --stylua: ignore
@@ -350,9 +324,11 @@ end
 --- `window.width` - width of floating window, including scrollbar and
 --- integration count column. Default: 10.
 ---
---- `window.winblend` - value of 'winblend' for map window. Value 0 makes it
+--- `window.winblend` - value of 'winblend' of floating window. Value 0 makes it
 --- completely non-transparent, 100 - completely transparent (content is still
 --- visible, but with slightly different highlights).
+---
+--- `window.zindex` - z-index of floating window. Default: 10.
 ---
 --- # Pure scrollbar config ~
 ---
@@ -411,6 +387,9 @@ MiniMap.config = {
 
     -- Value of 'winblend' option
     winblend = 25,
+
+    -- Z-index
+    zindex = 10,
   },
 }
 --minidoc_afterlines_end
@@ -543,7 +522,7 @@ end
 ---   visual indicators) and map window.
 --- - Call |MiniMap.refresh()|.
 ---
----@param opts __opts
+---@param opts __map_opts
 MiniMap.open = function(opts)
   -- Early returns
   if H.is_disabled() then return end
@@ -575,7 +554,7 @@ MiniMap.open = function(opts)
       'buftype=nofile', 'foldcolumn=0', 'foldlevel=999', 'matchpairs=', 'nobuflisted',
       'nomodeline',     'noreadonly',   'noswapfile',    'synmaxcol&',  'nowrap',
     }
-    -- Vim's `setlocal` is currently more robust comparing to `opt_local`
+    -- Vim's `setlocal` is currently more robust compared to `opt_local`
     -- Use `noautocmd` to make it more invisible for others
     vim.cmd(('silent! noautocmd setlocal %s'):format(table.concat(options, ' ')))
 
@@ -593,7 +572,7 @@ end
 --- - Update current map configuration via `opts`.
 --- - Update parts of displayed content via `parts`.
 ---
----@param opts __opts
+---@param opts __map_opts
 ---@param parts table|nil Which parts to update. Recognised keys with boolean
 ---   values (all `true` by default):
 ---   - <integrations> - whether to update integration highlights.
@@ -618,12 +597,12 @@ MiniMap.refresh = function(opts, parts)
   -- Possibly update parts in asynchronous fashion
   if parts.lines then vim.schedule(H.update_map_lines) end
   if parts.scrollbar then vim.schedule(H.update_map_scrollbar) end
-
+	-- <fork> forcefully update here before other integrations
 	vim.schedule(function() MiniMap.highlight_mark_lines() end)
-	-- MiniMap.highlight_mark_lines(marks)
+	vim.schedule(function() MiniMap.update_mark_locations() end)
+	-- </fork> forcefully update here before other integrations
 	if parts.integrations then vim.schedule(H.update_map_integrations) end
 
-	vim.schedule(function() MiniMap.update_mark_locations() end)
 
 end
 
@@ -644,7 +623,7 @@ end
 ---
 --- Open if not shown in current tabpage, close otherwise.
 ---
----@param opts table Input for |MiniMap.open()|.
+---@param opts table|nil Input for |MiniMap.open()|.
 MiniMap.toggle = function(opts)
   if H.is_window_open() then
     MiniMap.close()
@@ -668,11 +647,9 @@ end
 --- - Press `<Esc>` to go back to original position prior focusing on map window.
 ---   Equivalent to calling this function with `true` argument.
 ---
----@param use_previous_cursor boolean Whether to focus on source window at
+---@param use_previous_cursor boolean|nil Whether to focus on source window at
 ---   original cursor position (the one prior focusing on map window).
 MiniMap.toggle_focus = function(use_previous_cursor)
-  if use_previous_cursor == nil then use_previous_cursor = false end
-
   if not H.is_window_open() then return end
   local cur_win, map_win = vim.api.nvim_get_current_win(), H.get_current_map_win()
 
@@ -774,12 +751,10 @@ MiniMap.gen_integration.builtin_search = function(hl_groups)
 
   -- Update when necessary. Not ideal, because it won't react on `n/N/*`, etc.
   -- See https://github.com/neovim/neovim/issues/18879
-  vim.api.nvim_exec(
-    [[augroup MiniMapBuiltinSearch
-        au!
-        au OptionSet hlsearch lua MiniMap.on_integration_update()
-      augroup END]],
-    false
+  local augroup = vim.api.nvim_create_augroup('MiniMapBuiltinSearch', {})
+  vim.api.nvim_create_autocmd(
+    'OptionSet',
+    { group = augroup, pattern = 'hlsearch', callback = H.on_integration_update, desc = "On 'hlsearch' update" }
   )
 
   local search_hl = hl_groups.search
@@ -854,12 +829,10 @@ MiniMap.gen_integration.diagnostic = function(hl_groups)
   )
 
   -- Refresh map when needed
-  vim.api.nvim_exec(
-    [[augroup MiniMapDiagnostics
-        au!
-        au DiagnosticChanged * lua MiniMap.on_integration_update()
-      augroup END]],
-    false
+  local augroup = vim.api.nvim_create_augroup('MiniMapDiagnostics', {})
+  vim.api.nvim_create_autocmd(
+    'DiagnosticChanged',
+    { group = augroup, callback = H.on_integration_update, desc = 'On DiagnosticChanged' }
   )
 
   return function()
@@ -899,12 +872,10 @@ end
 MiniMap.gen_integration.gitsigns = function(hl_groups)
   if hl_groups == nil then hl_groups = { add = 'GitSignsAdd', change = 'GitSignsChange', delete = 'GitSignsDelete' } end
 
-  vim.api.nvim_exec(
-    [[augroup MiniMapGitsigns
-        au!
-        au User GitSignsUpdate lua MiniMap.on_integration_update()
-      augroup END]],
-    false
+  local augroup = vim.api.nvim_create_augroup('MiniMapGitsigns', {})
+  vim.api.nvim_create_autocmd(
+    'User',
+    { group = augroup, pattern = 'GitSignsUpdate', callback = H.on_integration_update, desc = 'On GitSignsUpdate' }
   )
 
   return function()
@@ -1031,7 +1002,6 @@ MiniMap.update_mark_locations = function(marks, hl_groups)
 	end
 end
 
-
 --- Act on content change
 ---
 --- No need to use it directly, everything is setup in |MiniMap.setup()|.
@@ -1115,7 +1085,7 @@ end
 
 -- Helper data ================================================================
 -- Module default config
-H.default_config = MiniMap.config
+H.default_config = vim.deepcopy(MiniMap.config)
 
 -- Cache for various operations
 H.cache = {
@@ -1201,7 +1171,7 @@ H.setup_config = function(config)
   -- General idea: if some table elements are not present in user-supplied
   -- `config`, take them from default config
   vim.validate({ config = { config, 'table', true } })
-  config = vim.tbl_deep_extend('force', H.default_config, config or {})
+  config = vim.tbl_deep_extend('force', vim.deepcopy(H.default_config), config or {})
 
   vim.validate({
     integrations = { config.integrations, H.is_valid_config_integrations },
@@ -1214,10 +1184,101 @@ end
 
 H.apply_config = function(config) MiniMap.config = config end
 
+H.create_autocommands = function()
+  local augroup = vim.api.nvim_create_augroup('MiniMap', {})
+
+  local au = function(event, pattern, callback, desc)
+    vim.api.nvim_create_autocmd(event, { group = augroup, pattern = pattern, callback = callback, desc = desc })
+  end
+
+  au({ 'BufEnter', 'BufWritePost', 'TextChanged', 'VimResized' }, '*', H.on_content_change, 'On content change')
+  au({ 'CursorMoved', 'WinScrolled' }, '*', H.on_view_change, 'On view change')
+  au('WinLeave', '*', H.on_winleave, 'On WinLeave')
+  au('ModeChanged', '*:n', H.on_content_change, 'On return to Normal mode')
+end
+
+--stylua: ignore
+H.create_default_hl = function()
+  local set_default_hl = function(name, data)
+    data.default = true
+    vim.api.nvim_set_hl(0, name, data)
+  end
+
+  set_default_hl('MiniMapNormal',      { link = 'NormalFloat' })
+  set_default_hl('MiniMapSymbolCount', { link = 'Special' })
+  set_default_hl('MiniMapSymbolLine',  { link = 'Title' })
+  set_default_hl('MiniMapSymbolView',  { link = 'Delimiter' })
+end
+
 H.is_disabled = function() return vim.g.minimap_disable == true or vim.b.minimap_disable == true end
 
-H.get_config =
-  function(config) return vim.tbl_deep_extend('force', MiniMap.config, vim.b.minimap_config or {}, config or {}) end
+H.get_config = function(config)
+  return vim.tbl_deep_extend('force', MiniMap.config, vim.b.minimap_config or {}, config or {})
+end
+
+-- Autocommands ---------------------------------------------------------------
+H.on_content_change = vim.schedule_wrap(function()
+  -- Using `vim.schedule_wrap()` helps computing more precise buffer data.
+  -- Example: if omitted, terminal buffer is recognized as normal and thus map
+  -- is updated.
+  if not H.is_proper_buftype() then return end
+  MiniMap.refresh()
+end)
+
+H.on_view_change = vim.schedule_wrap(function()
+  if not (H.is_proper_buftype() and H.is_source_buffer()) then return end
+  MiniMap.refresh({}, { integrations = false, lines = false })
+end)
+
+H.on_integration_update = vim.schedule_wrap(function()
+  if not (H.is_proper_buftype() and H.is_source_buffer()) then return end
+  MiniMap.refresh({}, { lines = false, scrollbar = false })
+end)
+
+H.on_winleave = function()
+  if not (H.is_proper_buftype() and H.is_source_buffer()) then return end
+
+  H.cache.previous_win.id = vim.api.nvim_get_current_win()
+  H.cache.previous_win.cursor = vim.api.nvim_win_get_cursor(0)
+end
+
+H.track_map_cursor = function()
+  -- Operate only inside map window but not just after focusing
+  H.cache.n_map_cursor_moves = H.cache.n_map_cursor_moves + 1
+  local cur_win, map_win = vim.api.nvim_get_current_win(), H.get_current_map_win()
+  if cur_win ~= map_win or H.cache.n_map_cursor_moves <= 1 then return end
+
+  -- Don't allow putting cursor inside offset (where scrollbar is)
+  local cur_pos = vim.api.nvim_win_get_cursor(map_win)
+  if cur_pos[2] < H.cache.scrollbar_data.offset then
+    vim.api.nvim_win_set_cursor(map_win, { cur_pos[1], H.cache.scrollbar_data.offset })
+  end
+
+  -- Synchronize cursors in map and previous window
+  local prev_win_id = H.cache.previous_win.id
+  if prev_win_id == nil then return end
+
+  vim.api.nvim_win_set_cursor(prev_win_id, { H.mapline_to_sourceline(cur_pos[1]), 0 })
+
+  -- Open just enough folds and center cursor
+  vim.api.nvim_win_call(prev_win_id, function() vim.cmd('normal! zvzz') end)
+end
+
+H.on_map_enter = function()
+  -- Check if anything is present (window can be not opened because there is
+  -- one buffer, but many possible windows; so this can be executed on second
+  -- `MiniMap.open()` without opened window)
+  if not H.is_window_open() or H.cache.previous_win.cursor == nil then return end
+
+  -- Put cursor in map window at line indicator to the right of scrollbar
+  local map_line = H.sourceline_to_mapline(H.cache.previous_win.cursor[1])
+  local win_id = H.get_current_map_win()
+
+  vim.api.nvim_win_set_cursor(win_id, { map_line, H.cache.scrollbar_data.offset })
+
+  -- Reset number of cursor moves to later check if should track cursor move
+  H.cache.n_map_cursor_moves = 0
+end
 
 -- Work with mask --------------------------------------------------------------
 ---@param strings table Array of strings
@@ -1289,7 +1350,7 @@ H.mask_rescale = function(mask, opts)
 end
 
 --- Convert extended map mask to strings. Each bin with resolution dimensions
---- is transformed into encode symbol. Single convertable `(resolution.row,
+--- is transformed into encode symbol. Single convertible `(resolution.row,
 --- resolution.col)` boolean mask is treated as binary digit: `true` as 1;
 --- `false` as 0; traversing left-right, top-bottom (top-left is lowest bit,
 --- bottom-right - highest).
@@ -1419,6 +1480,11 @@ H.is_valid_config_window = function(x, x_name)
     return false, H.msg_config(x_name .. '.winblend', 'number between 0 and 100')
   end
 
+  -- Z-index
+  if not (type(x.zindex) == 'number' and x.zindex > 0) then
+    return false, H.msg_config(x_name .. '.zindex', 'positive number')
+  end
+
   return true
 end
 
@@ -1444,10 +1510,10 @@ H.normalize_window_options = function(win_opts, full)
     -- Can be updated at `VimResized` event
     height = vim.o.lines - vim.o.cmdheight - (has_tabline and 1 or 0) - (has_statusline and 1 or 0),
     focusable = win_opts.focusable,
+    zindex = win_opts.zindex,
   }
   if not full then return res end
 
-  res.zindex = 10
   res.style = 'minimal'
   return res
 end
@@ -1469,15 +1535,15 @@ H.create_map_buffer = function()
   vim.api.nvim_buf_set_option(buf_id, 'filetype', 'minimap')
 
   -- Make buffer local mappings
-  vim.api.nvim_buf_set_keymap(buf_id, 'n', '<CR>', '<Cmd>lua MiniMap.toggle_focus(false)<CR>', { noremap = false })
-  vim.api.nvim_buf_set_keymap(buf_id, 'n', '<Esc>', '<Cmd>lua MiniMap.toggle_focus(true)<CR>', { noremap = false })
+  vim.keymap.set('n', '<CR>', '<Cmd>lua MiniMap.toggle_focus(false)<CR>', { buffer = buf_id })
+  vim.keymap.set('n', '<Esc>', '<Cmd>lua MiniMap.toggle_focus(true)<CR>', { buffer = buf_id })
 
   -- Make buffer local autocommands
-  local bufenter_cmd = string.format('au BufEnter <buffer=%d> lua MiniMap.on_map_enter()', buf_id)
-  vim.cmd(bufenter_cmd)
-
-  local cursormoved_cmd = string.format('au CursorMoved <buffer=%d> lua MiniMap.track_map_cursor()', buf_id)
-  vim.cmd(cursormoved_cmd)
+  vim.api.nvim_create_autocmd('BufEnter', { buffer = buf_id, callback = H.on_map_enter, desc = 'On map enter' })
+  vim.api.nvim_create_autocmd(
+    'CursorMoved',
+    { buffer = buf_id, callback = H.track_map_cursor, desc = 'Track map cursor' }
+  )
 
   -- Make buffer play nicely with other 'mini.nvim' modules
   vim.api.nvim_buf_set_var(buf_id, 'minicursorword_disable', true)
@@ -1493,7 +1559,7 @@ H.update_window_opts = function()
   vim.api.nvim_win_set_config(win_id, H.normalize_window_options(opts.window, false))
 
   -- 'winblend'
-  vim.api.nvim_win_call(win_id, function() vim.cmd('setlocal winblend=' .. opts.window.winblend) end)
+  vim.wo[win_id].winblend = opts.window.winblend
 end
 
 H.update_map_lines = function()
@@ -1624,7 +1690,7 @@ H.update_map_integrations = function()
       local cur_count = line_counts[map_line] or 0
       line_counts[map_line] = cur_count + 1
 
-      -- Actually highlight only first map line occurence
+      -- Actually highlight only first map line occurrence
       if cur_count == 0 then H.add_line_hl(buf_id, ns_id, lh.hl_group, map_line - 1) end
     end
   end
@@ -1712,7 +1778,12 @@ H.validate_if = function(predicate, x, x_name)
 end
 
 H.add_line_hl = function(buf_id, ns_id, hl_group, line)
-  pcall(vim.highlight.range, buf_id, ns_id, hl_group, { line, H.cache.scrollbar_data.offset }, { line, -1 })
+  H.set_extmark_safely(buf_id, ns_id, line, H.cache.scrollbar_data.offset, {
+    hl_group = hl_group,
+    end_row = line + 1,
+    end_col = 0,
+    strict = false,
+  })
 end
 
 H.set_extmark_safely = function(...) pcall(vim.api.nvim_buf_set_extmark, ...) end
@@ -1731,7 +1802,7 @@ H.tbl_repeat = function(x, n)
   return res
 end
 
--- stolen from https://github.com/chentoast/marks.nvim/blob/master/lua/marks/utils.lua
+-- marks utility stolen from https://github.com/chentoast/marks.nvim/blob/master/lua/marks/utils.lua
 function H.is_letter(char)
   return H.is_upper(char) or H.is_lower(char)
 end
