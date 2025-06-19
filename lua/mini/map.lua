@@ -1170,15 +1170,22 @@ H.default_symbols = H.block_symbols['3x2']
 H.setup_config = function(config)
   -- General idea: if some table elements are not present in user-supplied
   -- `config`, take them from default config
-  vim.validate({ config = { config, 'table', true } })
-  config = vim.tbl_deep_extend('force', vim.deepcopy(H.default_config), config or {})
+	if vim.version().major <= 10 then
+		vim.validate({ config = { config, 'table', true } })
+		config = vim.tbl_deep_extend('force', vim.deepcopy(H.default_config), config or {})
 
-  vim.validate({
-    integrations = { config.integrations, H.is_valid_config_integrations },
-    symbols = { config.symbols, H.is_valid_config_symbols },
-    window = { config.window, H.is_valid_config_window },
-  })
-
+		vim.validate({
+			integrations = { config.integrations, H.is_valid_config_integrations },
+			symbols = { config.symbols, H.is_valid_config_symbols },
+			window = { config.window, H.is_valid_config_window },
+		})
+	else
+		vim.validate("config", config,"table")
+		config = vim.tbl_deep_extend('force', vim.deepcopy(H.default_config), config or {})
+		vim.validate("integrations", config.integrations, H.is_valid_config_integrations)
+		vim.validate("symbols", config.symbols, H.is_valid_config_symbols);
+		vim.validate("window", config.window, H.is_valid_config_window);
+	end
   return config
 end
 
@@ -1731,7 +1738,7 @@ end
 
 -- Predicates ------------------------------------------------------------------
 H.is_array_of = function(x, predicate)
-  if not vim.tbl_islist(x) then return false end
+  if not vim.islist(x) then return false end
   for _, v in ipairs(x) do
     if not predicate(v) then return false end
   end
@@ -1757,8 +1764,10 @@ H.is_encode_symbols = function(x, x_name)
 end
 
 H.is_proper_buftype = function()
-  local buf_type = vim.bo.buftype
-  return buf_type == '' or buf_type == 'help'
+  -- 2025-05-13 Hahn: I always want to see map updates (esp position bar) on all buffers.
+  -- local buf_type = vim.bo.buftype
+  -- return buf_type == '' or buf_type == 'help'
+  return true
 end
 
 H.is_source_buffer = function() return vim.api.nvim_get_current_buf() == MiniMap.current.buf_data.source end
