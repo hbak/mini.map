@@ -907,25 +907,14 @@ end
 
 MiniMap.gen_integration.marks = function(hl_groups)
 	if hl_groups == nil then
-		local hl = 'IncludeInverted'
-		if not vim.fn.hlexists(hl) then
-			hl = 'Include'
-		end
-		hl_groups = { marks = hl }
+		hl_groups = { marks = 'MiniMapSymbolMarks' }
 	end
-
-  local buf_id = MiniMap.current.buf_data.map
-  local ns_id = H.ns_id.integrations
 
   return function()
 		local line_hl = {}
 		local marks = MiniMap.get_marks()
 		for _, mark in ipairs(marks) do
-			table.insert(line_hl, { line=mark[2], hl_group = hl_groups.marks })
-    end
-		for _, lh in ipairs(line_hl) do
-			local map_line = H.sourceline_to_mapline(lh.line)
-			H.add_line_hl(buf_id, ns_id, lh.hl_group, map_line - 1)
+			table.insert(line_hl, { line = mark[2], hl_group = hl_groups.marks })
 		end
 		return line_hl
 	end
@@ -957,19 +946,15 @@ end
 
 MiniMap.highlight_mark_lines = function(marks, hl_groups)
 	if hl_groups == nil then
-		local hl = 'IncludeInverted'
-		if not vim.fn.hlexists(hl) then
-			hl = 'Include'
-		end
-		hl_groups = { marks = hl }
+		hl_groups = { marks = 'MiniMapSymbolMarks' }
 	end
 	if marks == nil then
 		marks = MiniMap.get_marks()
 	end
 
 	local buf_id = MiniMap.current.buf_data.map
-	local ns_id = H.ns_id.integrations
-	-- local ns_id = "mini_marks_hahn"
+	local ns_id = H.ns_id.marks_hl
+	vim.api.nvim_buf_clear_namespace(buf_id, ns_id, 0, -1)
 
 	local line_hl = {}
 	for _, mark in ipairs(marks) do
@@ -990,7 +975,8 @@ MiniMap.update_mark_locations = function(marks, hl_groups)
 		marks = MiniMap.get_marks()
 	end
   local buf_id = MiniMap.current.buf_data.map
-  local ns_id = H.ns_id.integrations
+  local ns_id = H.ns_id.marks_virt
+  vim.api.nvim_buf_clear_namespace(buf_id, ns_id, 0, -1)
   local col = H.cache.scrollbar_data.offset - 1
 	for _, mark in ipairs(marks) do
 		local extmark_opts = {
@@ -1109,6 +1095,8 @@ H.ns_id = {
   integrations = vim.api.nvim_create_namespace('MiniMapIntegrations'),
   scroll_view = vim.api.nvim_create_namespace('MiniMapScrollView'),
   scroll_line = vim.api.nvim_create_namespace('MiniMapScrollLine'),
+  marks_hl = vim.api.nvim_create_namespace('MiniMapMarksHl'),
+  marks_virt = vim.api.nvim_create_namespace('MiniMapMarksVirt'),
 }
 
 --stylua: ignore start
@@ -1202,6 +1190,7 @@ H.create_autocommands = function()
   au({ 'CursorMoved', 'WinScrolled' }, '*', H.on_view_change, 'On view change')
   au('WinLeave', '*', H.on_winleave, 'On WinLeave')
   au('ModeChanged', '*:n', H.on_content_change, 'On return to Normal mode')
+  au('ColorScheme', '*', H.create_default_hl, 'Ensure colors')
 end
 
 --stylua: ignore
@@ -1215,6 +1204,15 @@ H.create_default_hl = function()
   set_default_hl('MiniMapSymbolCount', { link = 'Special' })
   set_default_hl('MiniMapSymbolLine',  { link = 'Title' })
   set_default_hl('MiniMapSymbolView',  { link = 'Delimiter' })
+
+  -- <fork> marks highlight: use the same color as the mark letter's foreground
+  -- (`Include`) as the line's background, instead of an unrelated generic color.
+  local marks_fg = vim.api.nvim_get_hl(0, { name = 'Include', link = false }).fg
+  if marks_fg ~= nil then
+    set_default_hl('MiniMapSymbolMarks', { bg = marks_fg })
+  else
+    set_default_hl('MiniMapSymbolMarks', { link = 'Visual' })
+  end
 end
 
 H.is_disabled = function() return vim.g.minimap_disable == true or vim.b.minimap_disable == true end
