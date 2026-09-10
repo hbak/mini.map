@@ -509,8 +509,7 @@ MiniMap.encode_strings = function(strings, opts)
   )
 
   -- Compute encoding
-  local mask = H.mask_from_strings(strings, opts)
-  mask = H.mask_rescale(mask, opts)
+  local mask = H.mask_rescaled_from_strings(strings, opts)
   return H.mask_to_symbols(mask, opts)
 end
 
@@ -1089,6 +1088,10 @@ H.cache = {
   -- Number of cursor movements inside map buffer since focusing. Needed to not
   -- update source buffer view just after focusing.
   n_map_cursor_moves = 0,
+
+  -- <fork> Fingerprint of the inputs that produced the map lines currently
+  -- shown. Used to skip re-encoding when nothing relevant has changed.
+  lines_key = nil,
 }
 
 H.ns_id = {
@@ -1286,68 +1289,73 @@ H.on_map_enter = function()
 end
 
 -- Work with mask --------------------------------------------------------------
----@param strings table Array of strings
----@return table Non-whitespace mask, boolean 2d array. Each row corresponds to
----   string, each column - to whether character with that number is a
----   non-whitespace. Respects multibyte characters.
+--- Build the rescaled non-whitespace mask directly from strings.
+---
+--- <fork> This replaces the upstream `H.mask_from_strings()` +
+--- `H.mask_rescale()` pair, which first materialised one boolean table cell
+--- per character in the whole buffer (hundreds of thousands of cells for a
+--- large file) only to immediately collapse it to the map's small grid, and
+--- called `vim.str_utfindex()` once per whitespace character (a prefix scan
+--- each time, so cost grew with the square of the line length). Together that
+--- made every map refresh block the editor for hundreds of milliseconds.
+---
+--- Instead this writes straight into the final grid and scans each line by
+--- maximal non-whitespace runs rather than character by character. Output is
+--- byte-identical to the old pair; see `test/encode_test.lua`. </fork>
+---
+---@param strings table Array of strings.
+---@return table Boolean 2d array with `opts.n_rows` * `symbols.resolution.row`
+---   rows and `opts.n_cols` * `symbols.resolution.col` columns (both capped by
+---   the source dimensions). A cell is `true` if any source character mapped
+---   into it is a non-whitespace. Respects multibyte characters.
 ---@private
-H.mask_from_strings = function(strings, _)
+H.mask_rescaled_from_strings = function(strings, opts)
+  local source_rows = #strings
+  local resolution = opts.symbols.resolution
+  local floor, find, gsub = math.floor, string.find, string.gsub
   local tab_space = string.rep(' ', vim.o.tabstop)
 
-  local res = {}
-  for i, s in ipairs(strings) do
-    -- Expand tabs into spaces
-    local s_ext = s:gsub('\t', tab_space)
-    local n_cols = H.str_width(s_ext)
-    local mask_row = H.tbl_repeat(true, n_cols)
-
-    -- Detect whitespace
-    s_ext:gsub('()%s', function(j) mask_row[vim.str_utfindex(s_ext, j)] = false end)
-    res[i] = mask_row
+  -- Pass 1: expand tabs, then collapse every multibyte sequence to a single
+  -- placeholder byte so that byte index == character index during pass 2.
+  -- Whitespace is always ASCII, so collapsing never merges or hides any.
+  local prepared, source_cols = {}, 0
+  for i = 1, source_rows do
+    local s = strings[i]
+    if find(s, '\t', 1, true) then s = gsub(s, '\t', tab_space) end
+    if find(s, '[\194-\244]') then s = gsub(s, '[\194-\244][\128-\191]*', '\1') end
+    prepared[i] = s
+    if #s > source_cols then source_cols = #s end
   end
 
-  return res
-end
-
----@param mask table Boolean 2d array.
----@return table Boolean 2d array rescaled to be shown by symbols:
----   `opts.n_rows` lines and `opts.n_cols` within a row.
----@private
-H.mask_rescale = function(mask, opts)
-  -- Infer output number of rows and columns. Should be multiples of
-  -- `symbols.resolution.row` and `symbols.resolution.col` respectively.
-  local source_rows = #mask
-  local source_cols = 0
-  for _, m_row in ipairs(mask) do
-    source_cols = math.max(source_cols, #m_row)
-  end
-
-  -- Compute effective number of rows and columns in output such that it can
-  -- contain all encoded symbols (taking into account their resolution).
-  -- Don't make it a multiple of resolution at this stage because it can later
-  -- lead to inaccurate representation in some cases. Like with small source
-  -- number of rows it will lead to conversion coefficients greater than 1
-  -- (because `math.ceil()` should be used to round for resolution) and some
-  -- rows in the middle of output will be skipped.
-  local resolution = opts.symbols.resolution
+  -- Infer output dimensions. Don't round to a multiple of resolution here: for
+  -- a small number of source rows that would push conversion coefficients
+  -- above 1 and skip rows in the middle of the output.
   local n_rows = math.min(source_rows, opts.n_rows * resolution.row)
   local n_cols = math.min(source_cols, opts.n_cols * resolution.col)
 
-  -- Rescale. It uses unequal but optimal bins to map source lines/columns to
-  -- boolean encoding (has target dimensions but multiplied by resolution).
-  -- Value within 2d-bin is `true` if at least one value within it is `true`.
   local res = {}
-  for i = 1, n_rows do
-    res[i] = H.tbl_repeat(false, n_cols)
-  end
+  for i = 1, n_rows do res[i] = H.tbl_repeat(false, n_cols) end
+  if n_cols == 0 then return res end
 
   local rows_coeff, cols_coeff = n_rows / source_rows, n_cols / source_cols
 
-  for i, m_row in ipairs(mask) do
-    for j, m in ipairs(m_row) do
-      local res_i = math.floor((i - 1) * rows_coeff) + 1
-      local res_j = math.floor((j - 1) * cols_coeff) + 1
-      res[res_i][res_j] = m or res[res_i][res_j]
+  -- Pass 2: mark the target column span of every maximal non-whitespace run.
+  -- Both coefficients are <= 1, so consecutive source characters land on
+  -- target columns that advance by 0 or 1. A run therefore covers a
+  -- contiguous, fully occupied span and can be filled as a range.
+  for i = 1, source_rows do
+    local s = prepared[i]
+    if #s > 0 then
+      local res_row = res[floor((i - 1) * rows_coeff) + 1]
+      local init = 1
+      while true do
+        local from, to = find(s, '%S+', init)
+        if from == nil then break end
+        for j = floor((from - 1) * cols_coeff) + 1, floor((to - 1) * cols_coeff) + 1 do
+          res_row[j] = true
+        end
+        init = to + 1
+      end
     end
   end
 
@@ -1581,12 +1589,34 @@ H.update_map_lines = function()
   -- Encode lines from current buffer
   local source_buf_id = vim.api.nvim_get_current_buf()
   MiniMap.current.buf_data.source = source_buf_id
+
+  local encode_symbols = opts.symbols.encode or H.default_symbols
+
+  -- <fork> Bail out when the map lines already on screen were produced by
+  -- exactly these inputs. `H.on_content_change()` is wired to `BufEnter`,
+  -- `TextChanged`, `BufWritePost`, `VimResized` and `ModeChanged *:n`, so
+  -- without this every window switch and every return to Normal mode re-ran
+  -- the full buffer encode to produce byte-identical output. Checked before
+  -- reading the source lines so an unchanged buffer isn't copied either.
+  local cache_key = table.concat({
+    buf_id,
+    source_buf_id,
+    vim.b[source_buf_id].changedtick,
+    n_rows,
+    n_cols,
+    offset,
+    vim.bo[source_buf_id].tabstop,
+    encode_symbols.resolution.row,
+    encode_symbols.resolution.col,
+    table.concat(encode_symbols),
+  }, '\0')
+  if cache_key == H.cache.lines_key then return end
+
   local buf_lines = vim.api.nvim_buf_get_lines(source_buf_id, 0, -1, true)
   -- Ensure that current buffer has lines (can be not the case when this is
   -- executed asynchronously during Neovim closing)
   if #buf_lines == 0 then return end
 
-  local encode_symbols = opts.symbols.encode or H.default_symbols
   local source_rows, scrollbar_prefix = #buf_lines, string.rep(' ', offset)
   local encoded_lines, rescaled_rows, resolution_row
   if n_cols <= 0 then
@@ -1622,6 +1652,10 @@ H.update_map_lines = function()
 
   -- Force scrollbar update
   H.cache.scrollbar_data.view, H.cache.scrollbar_data.line = {}, nil
+
+  -- <fork> Remember what produced these lines so the next identical refresh
+  -- can be skipped.
+  H.cache.lines_key = cache_key
 end
 
 H.update_map_scrollbar = function()
