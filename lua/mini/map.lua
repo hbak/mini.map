@@ -776,23 +776,10 @@ MiniMap.gen_integration.builtin_search = function(hl_groups)
     -- Do nothing if not inside source buffer (can happen in map buffer, for example)
     if not H.is_source_buffer() then return {} end
 
-    -- Save window view to later restore, as the only way to get positions of
-    -- search matches seems to be consecutive application of `search()` and
-    -- retrieving cursor position.
-    local win_view = vim.fn.winsaveview()
-
-    vim.api.nvim_win_set_cursor(0, { 1, 0 })
-    local search_count = vim.fn.searchcount({ recompute = true, maxcount = 0 })
     local search_pattern = vim.fn.getreg('/')
-    local line_hl = {}
-    for _ = 1, (search_count.total or 0) do
-      vim.fn.search(search_pattern)
-      table.insert(line_hl, { line = vim.fn.line('.'), hl_group = search_hl })
-    end
+    if search_pattern == '' then return {} end
 
-    vim.fn.winrestview(win_view)
-
-    return line_hl
+    return H.search_line_hl(search_pattern, search_hl)
   end
 end
 
@@ -1810,6 +1797,104 @@ H.mapline_to_sourceline = function(map_line)
   local rescaled_row = (map_line - 1) * data.resolution_row + 1
   local res = math.ceil((rescaled_row - 1) / coef) + 1
   return math.min(math.max(res, 1), data.source_rows)
+end
+
+-- Search ---------------------------------------------------------------------
+--- Map lines of current buffer that contain a search match.
+---
+--- <fork> Upstream walked the matches with repeated `search()` calls, looping
+--- exactly `searchcount().total` times. That call passed `maxcount = 0` but no
+--- `timeout`, and omitting `timeout` applies a ~40ms budget: on a large buffer
+--- or with an expensive pattern `searchcount()` gives up early and reports a
+--- partial `total`, so the walk never reached the rest of the buffer and the
+--- map simply had no highlights below that point. Because the budget is a time
+--- limit, the cut-off moved between refreshes.
+---
+--- Testing each line with a compiled |vim.regex| instead is both correct and
+--- much cheaper: it stops at the first match in a line rather than visiting
+--- every match (~3ms versus ~150ms for a token matching 100000 times in a
+--- 20000 line buffer).
+---
+--- NOTE: this reports one entry per matching *line*, where upstream reported
+--- one per match. With `window.show_integration_count` enabled, a map line now
+--- counts the matching source lines it covers rather than the raw matches.
+---@private
+H.search_line_hl = function(pattern, hl_group)
+  -- `match_line()` looks at a single line in isolation, so a pattern that spans
+  -- lines or asks about buffer position can not be answered with it. Those are
+  -- rare in an interactive search; walk the matches for them instead.
+  if pattern:find('\\n', 1, true) ~= nil or pattern:find('\\%', 1, true) ~= nil then
+    return H.search_line_hl_by_walk(pattern, hl_group)
+  end
+
+  local ok, re = pcall(vim.regex, H.search_pattern_with_case(pattern))
+  if not ok then return {} end
+
+  local buf_id = vim.api.nvim_get_current_buf()
+  local res = {}
+  for line = 1, vim.api.nvim_buf_line_count(buf_id) do
+    if re:match_line(buf_id, line - 1) ~= nil then
+      res[#res + 1] = { line = line, hl_group = hl_group }
+    end
+  end
+
+  return res
+end
+
+--- Fallback for patterns |vim.regex| can not answer line by line.
+---@private
+H.search_line_hl_by_walk = function(pattern, hl_group)
+  local res = {}
+
+  local win_view = vim.fn.winsaveview()
+  local ok = pcall(function()
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    -- `timeout = 0` means "no timeout" and is essential: without it this counts
+    -- for at most ~40ms and silently returns a partial total.
+    local search_count = vim.fn.searchcount({ recompute = true, maxcount = 0, timeout = 0 })
+    local seen = {}
+    for _ = 1, (search_count.total or 0) do
+      vim.fn.search(pattern)
+      local line = vim.fn.line('.')
+      if not seen[line] then
+        seen[line] = true
+        res[#res + 1] = { line = line, hl_group = hl_group }
+      end
+    end
+  end)
+  vim.fn.winrestview(win_view)
+
+  return ok and res or {}
+end
+
+--- Make the case rule of a search pattern explicit.
+---
+--- Vim applies 'ignorecase' and 'smartcase' when it runs a search command, but
+--- |vim.regex| is always case sensitive unless the pattern itself says
+--- otherwise. Prepending `\c` or `\C` (valid in every 'magic' mode) keeps the
+--- map agreeing with what the search actually highlighted.
+---@private
+H.search_pattern_with_case = function(pattern)
+  local has_case_atom, has_upper = false, false
+  local i, n = 1, #pattern
+  while i <= n do
+    local char = pattern:sub(i, i)
+    if char == '\\' then
+      -- `\c`/`\C` anywhere in the pattern override both options
+      local next_char = pattern:sub(i + 1, i + 1)
+      if next_char == 'c' or next_char == 'C' then has_case_atom = true end
+      -- Skip the escaped character: `\S` is a class, not an upper case letter
+      i = i + 2
+    else
+      if char:match('%u') ~= nil then has_upper = true end
+      i = i + 1
+    end
+  end
+  if has_case_atom then return pattern end
+
+  local ignore_case = vim.o.ignorecase
+  if ignore_case and vim.o.smartcase and has_upper then ignore_case = false end
+  return (ignore_case and '\\c' or '\\C') .. pattern
 end
 
 -- Hunks ----------------------------------------------------------------------
